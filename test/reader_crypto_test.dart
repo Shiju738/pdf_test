@@ -8,10 +8,10 @@ import 'dart:typed_data';
 import 'package:cryptography/cryptography.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pointycastle/export.dart';
-import 'package:secure_pdf_reader_test/src/chunk_cipher.dart';
-import 'package:secure_pdf_reader_test/src/der.dart';
-import 'package:secure_pdf_reader_test/src/file_layout.dart';
-import 'package:secure_pdf_reader_test/src/reader_key.dart';
+import 'package:secure_pdf_reader_test/core/crypto/chunk_cipher.dart';
+import 'package:secure_pdf_reader_test/core/crypto/der.dart';
+import 'package:secure_pdf_reader_test/data/models/file_layout.dart';
+import 'package:secure_pdf_reader_test/data/models/reader_key.dart';
 
 import 'support/sample.dart';
 

@@ -8,8 +8,8 @@ import 'dart:typed_data';
 
 import 'package:cryptography/cryptography.dart';
 import 'package:pointycastle/export.dart';
-import 'package:secure_pdf_reader_test/src/file_layout.dart';
-import 'package:secure_pdf_reader_test/src/reader_key.dart';
+import 'package:secure_pdf_reader_test/data/models/file_layout.dart';
+import 'package:secure_pdf_reader_test/data/models/reader_key.dart';
 
 File fixture(String name) => File('test/fixtures/$name');
 

@@ -2,8 +2,9 @@ import 'dart:isolate';
 import 'dart:typed_data';
 
 import 'package:cryptography/cryptography.dart';
+import 'package:cryptography_flutter/cryptography_flutter.dart';
 
-import 'file_layout.dart';
+import '../../data/models/file_layout.dart';
 
 /// Decrypts the chunks of one file.
 ///
@@ -16,7 +17,9 @@ class ChunkCipher {
     required this.layout,
     required Uint8List fileKey,
     this.inBackground = true,
-  }) : _fileKey = Uint8List.fromList(fileKey) {
+    AesGcm? nativeAes,
+  }) : _fileKey = Uint8List.fromList(fileKey),
+       _nativeAes = nativeAes ?? platformAes {
     if (fileKey.length != 32) {
       throw ArgumentError('The file key must be 32 bytes.');
     }
@@ -30,6 +33,21 @@ class ChunkCipher {
 
   Uint8List? _fileKey;
 
+  /// The operating system's AES-GCM (CryptoKit on iOS, javax.crypto on
+  /// Android), or null where there is none (tests, desktop). It is hardware
+  /// accelerated: a 256 KB chunk takes well under a millisecond, where the
+  /// pure-Dart cipher takes tens of milliseconds, more on a phone. Opening a
+  /// page far into a book decrypts many chunks in a row, so this is most of
+  /// the wait.
+  final AesGcm? _nativeAes;
+
+  /// The platform's AES-GCM through the cryptography_flutter plugin, or null
+  /// when the plugin isn't there. Only the main isolate has the plugin.
+  static AesGcm? get platformAes {
+    final aes = FlutterAesGcm.with256bits();
+    return aes.isSupportedPlatform ? aes : null;
+  }
+
   /// The PDF bytes of the chunks [indexes], given their stored bytes (each one
   /// its encrypted bytes followed by the 16-byte tag), in the same order.
   ///
@@ -39,6 +57,9 @@ class ChunkCipher {
     if (key == null) throw StateError('The file key was dropped.');
     final nonces = [for (final index in indexes) layout.nonce(index)];
     final header = layout.header;
+    final native = _nativeAes;
+    // The plugin call is asynchronous: the screen goes on meanwhile.
+    if (native != null) return _decryptAll(key, header, nonces, stored, native);
     if (!inBackground) return _decryptAll(key, header, nonces, stored);
     // Copies, so the closure sends only bytes to the other isolate.
     final chunks = [for (final chunk in stored) Uint8List.fromList(chunk)];
@@ -56,9 +77,11 @@ Future<List<Uint8List>> _decryptAll(
   Uint8List fileKey,
   Uint8List header,
   List<Uint8List> nonces,
-  List<Uint8List> stored,
-) async {
-  final aes = AesGcm.with256bits();
+  List<Uint8List> stored, [
+  AesGcm? cipher,
+]) async {
+  // In a background isolate this is the pure-Dart AES-GCM.
+  final aes = cipher ?? AesGcm.with256bits();
   final secretKey = SecretKey(fileKey);
   final plain = <Uint8List>[];
   for (var i = 0; i < stored.length; i++) {

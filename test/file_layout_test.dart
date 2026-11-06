@@ -1,7 +1,7 @@
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:secure_pdf_reader_test/src/file_layout.dart';
+import 'package:secure_pdf_reader_test/data/models/file_layout.dart';
 
 FileLayout layout({required int fileSize, int chunkSize = 262144}) => FileLayout(
   version: 'v',

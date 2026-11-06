@@ -5,10 +5,10 @@ import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:secure_pdf_reader_test/src/chunk_cipher.dart';
-import 'package:secure_pdf_reader_test/src/chunk_source.dart';
-import 'package:secure_pdf_reader_test/src/file_layout.dart';
-import 'package:secure_pdf_reader_test/src/reader_api.dart';
+import 'package:secure_pdf_reader_test/core/crypto/chunk_cipher.dart';
+import 'package:secure_pdf_reader_test/data/services/chunk_source.dart';
+import 'package:secure_pdf_reader_test/data/models/file_layout.dart';
+import 'package:secure_pdf_reader_test/data/services/reader_api.dart';
 
 import 'support/sample.dart';
 
@@ -37,8 +37,10 @@ class TestFile {
 
   FileLayout get layout => server.layout;
 
-  ChunkSource source({int maxCachedChunks = 128}) => ChunkSource(
+  /// Read-ahead is off unless a test turns it on, so requests are exact.
+  ChunkSource source({int maxCachedChunks = 128, int maxReadAhead = 0}) => ChunkSource(
     layout: layout,
+    maxReadAhead: maxReadAhead,
     fetch: server.fetch,
     cipher: ChunkCipher(layout: layout, fileKey: fileKey, inBackground: false),
     maxCachedChunks: maxCachedChunks,
@@ -136,6 +138,94 @@ void main() {
     expect(whole, file.pdf);
     expect(file.server.requests, ['0-63', '64-99']);
     source.dispose();
+  });
+
+  group('read-ahead', () {
+    test('misses in order fetch the chunks after them, in a request of their own', () async {
+      final file = await TestFile.make(size: 40 * 1024);
+      final source = file.source(maxReadAhead: 4);
+      await source.prefetchEnds();
+      // PDFium walking forward through the file, one chunk at a time.
+      for (var n = 1; n <= 12; n++) {
+        await file.expectRead(source, n * 1024 + 7, 10);
+      }
+      await Future<void>.delayed(Duration.zero);
+      // The read-ahead comes in pieces of 2, nearest first.
+      expect(file.server.requests, [
+        '0,39', '1', '2', '3', '4-5', '6', '7-8', '9-10', '11', '12-13', '14-15',
+      ]);
+      source.dispose();
+    });
+
+    test('a lone miss elsewhere starts small again', () async {
+      final file = await TestFile.make(size: 40 * 1024);
+      final source = file.source(maxReadAhead: 4);
+      await file.expectRead(source, 1 * 1024, 10);
+      await file.expectRead(source, 2 * 1024, 10);
+      await file.expectRead(source, 30 * 1024, 10);
+      await Future<void>.delayed(Duration.zero);
+      // 2 came with 1; 30 is out of order, so only 31 comes with it.
+      expect(file.server.requests, ['1', '2', '30', '31']);
+      source.dispose();
+    });
+
+    test('a jump fetches where the page probably is, before PDFium asks', () async {
+      final file = await TestFile.make(size: 40 * 1024);
+      final source = file.source(maxReadAhead: 8);
+      await source.prefetchEnds();
+      expect(source.chunkOfPage(50, 100), 19);
+      source.prepareJump(50, 100);
+      source.prepareJump(50, 100); // again: nothing new is asked for
+      await Future<void>.delayed(Duration.zero);
+      expect(file.server.requests, ['0,39', '18-19', '20']);
+      await file.expectRead(source, 19 * 1024 + 5, 10); // already here
+      expect(file.server.requests.length, 3);
+      source.dispose();
+    });
+
+    test('during a jump, a walk in order is fetched up to the page at once', () async {
+      final file = await TestFile.make(size: 40 * 1024);
+      final source = file.source(maxReadAhead: 8);
+      await source.prefetchEnds();
+      source.prepareJump(50, 100); // around chunk 19
+      for (var n = 1; n <= 3; n++) {
+        await file.expectRead(source, n * 1024 + 3, 10); // PDFium walking
+      }
+      await Future<void>.delayed(Duration.zero);
+      // 1 alone (with 2), then at 3 the walk is clear: 4 to 17 in pieces of
+      // 2, sent at once. 18 to 20 were asked for by the jump itself.
+      expect(file.server.requests, [
+        '0,39', '18-19', '20', '1', '2', '3',
+        '4-5', '6-7', '8-9', '10-11', '12-13', '14-15', '16-17',
+      ]);
+      for (var n = 4; n <= 20; n++) {
+        await file.expectRead(source, n * 1024, 10);
+      }
+      expect(file.server.requests.length, 13, reason: 'the walk needed nothing more');
+      source.dispose();
+    });
+
+    test('a jump does nothing once the screen is leaving', () async {
+      final file = await TestFile.make(size: 40 * 1024);
+      final source = file.source(maxReadAhead: 8);
+      source.leave();
+      source.prepareJump(50, 100);
+      await Future<void>.delayed(Duration.zero);
+      expect(file.server.requests, isEmpty);
+      source.dispose();
+    });
+
+    test('never asks for the last chunk or past it', () async {
+      final file = await TestFile.make(size: 10 * 1024);
+      final source = file.source(maxReadAhead: 8);
+      for (var n = 5; n <= 9; n++) {
+        await file.expectRead(source, n * 1024, 10);
+      }
+      await Future<void>.delayed(Duration.zero);
+      expect(file.server.requests.every((r) => !r.contains(RegExp(r'\b(1\d)\b'))), isTrue);
+      expect(file.server.requests.where((r) => r.contains('9')).length, 1);
+      source.dispose();
+    });
   });
 
   test('two reads that need the same chunk share one request', () async {

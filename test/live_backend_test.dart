@@ -16,11 +16,11 @@ import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pdfrx/pdfrx.dart';
-import 'package:secure_pdf_reader_test/src/chunk_cipher.dart';
-import 'package:secure_pdf_reader_test/src/chunk_source.dart';
-import 'package:secure_pdf_reader_test/src/format.dart';
-import 'package:secure_pdf_reader_test/src/reader_api.dart';
-import 'package:secure_pdf_reader_test/src/reader_key.dart';
+import 'package:secure_pdf_reader_test/core/crypto/chunk_cipher.dart';
+import 'package:secure_pdf_reader_test/data/services/chunk_source.dart';
+import 'package:secure_pdf_reader_test/core/utils/format.dart';
+import 'package:secure_pdf_reader_test/data/services/reader_api.dart';
+import 'package:secure_pdf_reader_test/data/models/reader_key.dart';
 
 const _accessUrl = String.fromEnvironment('READER_TEST_URL');
 const _pdfiumPath = String.fromEnvironment('PDFIUM_PATH');

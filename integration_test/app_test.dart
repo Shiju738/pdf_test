@@ -9,6 +9,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
+import 'package:secure_pdf_reader_test/app/bindings/initial_binding.dart';
 import 'package:secure_pdf_reader_test/main.dart';
 
 const _accessUrl = String.fromEnvironment('ACCESS_URL');
@@ -46,6 +47,7 @@ void main() {
   testWidgets('makes a key pair, opens the PDF from the access URL and shows it', (
     tester,
   ) async {
+    InitialBinding.dependencies();
     await tester.pumpWidget(const ReaderTestApp());
 
     // 1. The key pair: made on the first start, loaded afterwards.
@@ -76,6 +78,7 @@ void main() {
 
     // 5. A jump to the middle of the book (a tap on the middle of the page
     // slider) brings the chunks of that part, and still not the whole file.
+    final jumpClock = Stopwatch()..start();
     await tester.tap(find.byKey(const Key('pageSlider')));
     for (var i = 0; i < 120; i++) {
       await tester.pump(const Duration(milliseconds: 250));
@@ -84,7 +87,8 @@ void main() {
         break;
       }
     }
-    debugPrint('AFTER THE JUMP: ${textOf(tester, 'pageNumber')}; ${textOf(tester, 'fetched')}');
+    debugPrint('AFTER THE JUMP (${jumpClock.elapsedMilliseconds} ms): '
+        '${textOf(tester, 'pageNumber')}; ${textOf(tester, 'fetched')}');
     expect(textOf(tester, 'pageNumber'), isNot(startsWith('Page 1 of ')));
     expect(fetchedChunks(tester), greaterThan(onPageOne));
     expect(textOf(tester, 'fetched'), isNot(contains('(100%)')));

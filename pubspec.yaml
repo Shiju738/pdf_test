@@ -21,7 +21,12 @@ dependencies:
   cryptography: ^2.7.0
   # Keeps the private key.
   flutter_secure_storage: ^9.2.4
-  http: ^1.6.0
+  get: ^4.7.3
+  go_router: ^17.5.0
+  cryptography_flutter: ^2.3.4
+  dio: ^5.11.1
+  # The cache folder that keeps fetched (still encrypted) chunks.
+  path_provider: ^2.1.5
 
 dev_dependencies:
   flutter_test:
