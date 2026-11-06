@@ -1,0 +1,34 @@
+name: secure_pdf_reader_test
+description: "Test app: reads an encrypted Notespaedia PDF in chunks with pdfrx."
+publish_to: 'none'
+
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.11.4
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  cupertino_icons: ^1.0.8
+  # The PDF viewer. It can read a PDF through a function, so the app can feed
+  # it decrypted chunks. 2.4.7 is the newest that runs on Flutter 3.41.
+  pdfrx: ^2.4.7
+  # RSA key pair and RSA-OAEP unwrap.
+  pointycastle: ^3.9.1
+  # AES-256-GCM.
+  cryptography: ^2.7.0
+  # Keeps the private key.
+  flutter_secure_storage: ^9.2.4
+  http: ^1.6.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  integration_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true

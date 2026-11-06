@@ -1,0 +1,11 @@
+{
+  "version": "262144.772417.44ef8052a6f182b17f56e0fb790cfbdf",
+  "file_size": 772341,
+  "chunk_size": 262144,
+  "tag_size": 16,
+  "total_chunks": 3,
+  "header": "TlBFTkMxCgAABAAASCYJIuAiK0hEyVaf4XyKfg==",
+  "cipher": "AES-256-GCM",
+  "wrapped_key": "OHejvbMANAfWkoFfO3OVVCc6TB3R9dkIlLho3maZl8GFmaQxu66bHbGk1RL7lnsEnQPQjy+HbCFit7CRN6nT9rnZDgRzkKw3R3AmrFkDaf9eQzYQjrATXV2YvTzz4Ef0/VQkcPCn/YhFMvS/7QzmdL7cuQNRcUt3KoXzadCtbSLWIIhIVlGDw5R+jwxrWgc2AB4CDPEHJXEDe7swEPtAIbC4vSJXgIXqRg0pfU0dF0NnDrbB+gOXY8URuTZ1zfy5Okkr981whTfTi3e0pdj6EGPD7JtklzyRnyKOq/lI84ONVeYA4oCqCWBkRW3qpUzdie7QaPg4DV+NHwiOwt0dLw==",
+  "key_algorithm": "RSA-OAEP-SHA256"
+}
