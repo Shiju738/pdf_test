@@ -62,7 +62,7 @@ void main() {
       cipher: ChunkCipher(layout: layout, fileKey: fileKey),
       maxReadAhead: _readAhead,
       readAheadPiece: _piece,
-      fetch: (chunks) async {
+      fetch: (chunks, _) async {
         final answer = await server.fetch(chunks);
         await Future<void>.delayed(
           _latency + Duration(microseconds: answer.length * 1000000 ~/ _bytesPerSecond),

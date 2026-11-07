@@ -13,6 +13,7 @@ class PdfAccess {
     required this.wrappedKey,
     required this.keyAlgorithm,
     required this.streamUrl,
+    this.pageChunks,
   });
 
   /// [accessUrl] is the URL that gave this answer: a relative `stream_url` is
@@ -34,7 +35,23 @@ class PdfAccess {
       wrappedKey: base64Decode(json['wrapped_key'] as String),
       keyAlgorithm: json['key_algorithm'] as String,
       streamUrl: accessUrl.resolve(json['stream_url'] as String),
+      pageChunks: _pageChunks(json['page_chunks']),
     );
+  }
+
+  /// `"page_chunks": {"25": [17, 18], …}`: for each page (from 1), the chunks
+  /// needed to draw it. Optional: null when the server doesn't send it, or
+  /// sends something this app can't read (then the app guesses instead).
+  static Map<int, List<int>>? _pageChunks(Object? value) {
+    if (value is! Map) return null;
+    try {
+      return {
+        for (final MapEntry(:key, :value) in value.entries)
+          int.parse('$key'): [for (final n in value as List) n as int],
+      };
+    } catch (_) {
+      return null;
+    }
   }
 
   final String name;
@@ -49,4 +66,8 @@ class PdfAccess {
 
   /// Where the chunks come from. It already names the file's version.
   final Uri streamUrl;
+
+  /// The chunks each page needs (page number → chunk numbers), when the
+  /// server sends `page_chunks`. Used to fetch a jumped-to page first.
+  final Map<int, List<int>>? pageChunks;
 }

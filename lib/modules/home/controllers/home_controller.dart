@@ -202,7 +202,11 @@ class HomeController extends GetxController {
         layout: layout,
         cipher: cipher,
         stored: stored,
-        fetch: (chunks) => api.fetchChunks(streamUrl, chunks),
+        fetch: (chunks, cancelled) =>
+            api.fetchChunks(streamUrl, chunks, cancelled: cancelled),
+        // The server's page map, when it sends one: jumps then fetch exactly
+        // the chunks of the page.
+        pageChunks: access.pageChunks,
         isTemporary: ReaderApi.isTemporary,
       );
       // The source waits out network trouble for as long as it takes; this

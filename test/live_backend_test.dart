@@ -55,7 +55,8 @@ void main() {
     final source = ChunkSource(
       layout: access.layout,
       cipher: ChunkCipher(layout: access.layout, fileKey: fileKey),
-      fetch: (chunks) => api.fetchChunks(access.streamUrl, chunks),
+      fetch: (chunks, cancelled) =>
+          api.fetchChunks(access.streamUrl, chunks, cancelled: cancelled),
       isTemporary: ReaderApi.isTemporary,
     );
     return (access, source);

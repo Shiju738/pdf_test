@@ -30,10 +30,18 @@ class ReaderApi {
   /// The stored chunks [chunks] names (for example `0-1,22`), still
   /// encrypted, one after another in the order asked.
   // No Accept header: the server would refuse "application/octet-stream".
-  Future<Uint8List> fetchChunks(Uri streamUrl, String chunks) => _api.getBytes(
+  ///
+  /// When [cancelled] completes first, the request is aborted (Dio
+  /// CancelToken) and this throws.
+  Future<Uint8List> fetchChunks(
+    Uri streamUrl,
+    String chunks, {
+    Future<void>? cancelled,
+  }) => _api.getBytes(
     streamUrl.replace(
       queryParameters: {...streamUrl.queryParameters, 'chunks': chunks},
     ),
+    cancelled: cancelled,
   );
 
   /// See [isTemporaryApiError].

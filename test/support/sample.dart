@@ -139,9 +139,25 @@ class FakeChunkServer {
   /// Changes the answer's bytes; a test damages an answer with this.
   Uint8List Function(Uint8List answer)? tamper;
 
-  Future<Uint8List> fetch(String chunks) async {
+  /// When set, answers wait for it: a test can then look at what is on the
+  /// way at once, and cancel requests.
+  Future<void>? holdAnswers;
+
+  /// The requests cancelled while held.
+  final cancelled = <String>[];
+
+  Future<Uint8List> fetch(String chunks, [Future<void>? cancel]) async {
     requests.add(chunks);
     await Future<void>.delayed(Duration.zero); // answers are never instant
+    final hold = holdAnswers;
+    if (hold != null) {
+      var wasCancelled = false;
+      await Future.any([hold, if (cancel != null) cancel.then((_) => wasCancelled = true)]);
+      if (wasCancelled) {
+        cancelled.add(chunks);
+        throw StateError('cancelled');
+      }
+    }
     beforeAnswer?.call(chunks);
     final runs = chunks.split(',');
     if (runs.length > maxRunsPerRequest) {

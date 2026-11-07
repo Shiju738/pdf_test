@@ -12,7 +12,32 @@ import 'chunk_store.dart';
 /// request, such as `0-1,22`, and the answer is those chunks one after
 /// another. Online this is a call to the chunks endpoint; for a downloaded
 /// file it would read the same bytes from disk.
-typedef ChunkFetcher = Future<Uint8List> Function(String chunks);
+///
+/// [cancelled] completes when the answer isn't wanted any more (the user
+/// jumped elsewhere): the fetcher may then abort the request and throw.
+typedef ChunkFetcher =
+    Future<Uint8List> Function(String chunks, Future<void> cancelled);
+
+/// How urgent a chunk request is. The lower the level, the sooner it is sent.
+enum ChunkPriority {
+  /// 1: PDFium is waiting for this chunk right now, and can draw nothing else
+  /// meanwhile. Sent at once, whatever else is going on.
+  needed(1, 'needed now'),
+
+  /// 2: chunks of the page the user just jumped to.
+  jump(2, 'jump target'),
+
+  /// 3: read-ahead, chunks that will probably be needed soon. Sent only when
+  /// nothing more urgent is waiting, and dropped when the user jumps.
+  ahead(3, 'read-ahead');
+
+  const ChunkPriority(this.level, this.label);
+
+  final int level;
+  final String label;
+
+  bool isMoreUrgentThan(ChunkPriority other) => level < other.level;
+}
 
 /// Tells a failure that may pass (the network dropped, the server is busy)
 /// from one that won't (the server refused).
@@ -63,6 +88,8 @@ class ChunkSource extends ChangeNotifier {
     this.maxReadAhead = 8,
     this.readAheadPiece = 2,
     this.maxJumpAhead = 16,
+    this.maxInFlight = 3,
+    this.pageChunks,
     TemporaryTest? isTemporary,
   }) : _fetch = fetch,
        _cipher = cipher,
@@ -99,6 +126,19 @@ class ChunkSource extends ChangeNotifier {
   /// How many answers in a row may fail to decrypt before the source gives up
   /// on the file.
   final int maxDamagedAnswers;
+
+  /// At most this many requests at once at levels 2 and 3. Over a slow link,
+  /// requests sent together share its speed: fewer at once means the most
+  /// urgent one arrives sooner. Level 1 doesn't wait for this.
+  final int maxInFlight;
+
+  /// The chunks each page needs, from the server (`page_chunks`), or null.
+  /// When there, a jump fetches exactly these; otherwise it guesses.
+  final Map<int, List<int>>? pageChunks;
+
+  /// Prints each request (sent, raised, dropped, cancelled) with its level,
+  /// in debug builds. A test can turn it off.
+  static bool log = kDebugMode;
 
   final ChunkFetcher _fetch;
   final ChunkCipher _cipher;
@@ -224,28 +264,47 @@ class ChunkSource extends ChangeNotifier {
     if (failure != null) throw failure;
   }
 
-  /// The decrypted chunks [indexes], from the cache or fetched now.
+  /// The decrypted chunks [indexes], from the cache or fetched now. Whoever
+  /// calls this waits for them, so they are fetched at level 1.
   Future<Map<int, Uint8List>> _chunks(Set<int> indexes) async {
     final missing = [
       for (final index in indexes)
         if (!_cache.containsKey(index) && !_loading.containsKey(index)) index,
-    ];
+    ]..sort();
     if (missing.isNotEmpty) {
-      final ahead = _readAhead(missing);
-      _load(missing);
-      // Requests of their own, sent at the same time: the chunks asked for now
-      // don't wait for the read-ahead to arrive and be decrypted, and the
-      // read-ahead comes in small pieces, nearest first.
-      _loadInPieces(ahead);
+      final (ahead, aheadPriority) = _readAhead(missing);
+      _load(missing, ChunkPriority.needed);
+      // Requests of their own: the chunks asked for now don't wait for the
+      // read-ahead to arrive and be decrypted, and the read-ahead comes in
+      // small pieces, nearest first.
+      _loadInPieces(ahead, aheadPriority);
     }
     // Taken before the first await: the cache may drop a chunk meanwhile.
     final waiting = {
       for (final index in indexes)
         index: _cached(index) ?? _loading[index]!,
     };
-    return {
-      for (final entry in waiting.entries) entry.key: await entry.value,
-    };
+    // Someone waits for these now: a request for them that is still queued
+    // at a lower level moves up to level 1, and none of them is cancelled.
+    final waitedFor = [for (final index in indexes) if (!_cache.containsKey(index)) index];
+    for (final index in waitedFor) {
+      _waiters[index] = (_waiters[index] ?? 0) + 1;
+      _raise(index, ChunkPriority.needed);
+    }
+    try {
+      return {
+        for (final entry in waiting.entries) entry.key: await entry.value,
+      };
+    } finally {
+      for (final index in waitedFor) {
+        final left = (_waiters[index] ?? 1) - 1;
+        if (left > 0) {
+          _waiters[index] = left;
+        } else {
+          _waiters.remove(index);
+        }
+      }
+    }
   }
 
   // ── Read-ahead ──────────────────────────────────────────────────────────
@@ -255,16 +314,16 @@ class ChunkSource extends ChangeNotifier {
   // PDFs those lie between the pages' contents. So a jump to the middle of a
   // book misses chunk after chunk in order: 1, 2, 3, … each a round trip.
   //
-  // When the misses run in order, the chunks after them are asked for in the
-  // same request, and the window doubles while the run goes on (like a file
-  // system's read-ahead). A lone miss somewhere else starts over, small.
+  // When the misses run in order, the chunks after them are asked for too,
+  // and the window doubles while the run goes on (like a file system's
+  // read-ahead). A lone miss somewhere else starts over, small.
 
   /// Chunks fetched with a miss when misses run in order: 2, 4, 8 … up to this.
   final int maxReadAhead;
 
-  /// Read-ahead is sent in requests of at most this many chunks, all at once.
-  /// Small pieces arrive and are decrypted one after another, so the next
-  /// chunk PDFium needs is ready first instead of waiting for the whole lot.
+  /// Read-ahead is sent in requests of at most this many chunks. Small pieces
+  /// arrive and are decrypted one after another, so the next chunk PDFium
+  /// needs is ready first instead of waiting for the whole lot.
   final int readAheadPiece;
 
   /// On a jump ([prepareJump]), how far a walk may be fetched ahead at once.
@@ -279,9 +338,10 @@ class ChunkSource extends ChangeNotifier {
   /// Where the page being jumped to probably is, until the walk reaches it.
   int? _jumpTarget;
 
-  /// The chunks to fetch along with [missing], which is sorted.
-  List<int> _readAhead(List<int> missing) {
-    if (maxReadAhead <= 0) return const [];
+  /// The chunks to fetch along with [missing] (sorted), and at what level:
+  /// on the way to a jumped-to page they are level 2, otherwise level 3.
+  (List<int>, ChunkPriority) _readAhead(List<int> missing) {
+    if (maxReadAhead <= 0) return (const [], ChunkPriority.ahead);
     final first = missing.first;
     final last = missing.last;
     // In order: the miss is just past what the run asked for (a chunk or so
@@ -289,6 +349,7 @@ class ChunkSource extends ChangeNotifier {
     final inOrder = first > _runEnd && first <= _runEnd + 1 + max(1, _window);
     _window = inOrder ? min(maxReadAhead, max(2, _window * 2)) : min(maxReadAhead, 1);
     var until = last + _window;
+    var priority = ChunkPriority.ahead;
     final target = _jumpTarget;
     if (target != null) {
       if (last > target) {
@@ -296,8 +357,9 @@ class ChunkSource extends ChangeNotifier {
       } else if (inOrder) {
         // A second miss in order while a jump is on: PDFium is walking the
         // page tree towards the target. Everything up to it will be read, so
-        // ask for all of it now instead of growing the window step by step.
+        // ask for all of it now, as part of the jump.
         until = max(until, min(target + 1, last + maxJumpAhead));
+        priority = ChunkPriority.jump;
         _jumpTarget = null;
       }
     }
@@ -307,13 +369,13 @@ class ChunkSource extends ChangeNotifier {
         if (!_cache.containsKey(n) && !_loading.containsKey(n)) n,
     ];
     _runEnd = extra.isEmpty ? last : extra.last;
-    return extra;
+    return (extra, priority);
   }
 
-  void _loadInPieces(List<int> indexes) {
+  void _loadInPieces(List<int> indexes, ChunkPriority priority) {
     final size = max(1, readAheadPiece);
     for (var i = 0; i < indexes.length; i += size) {
-      _load(indexes.sublist(i, min(indexes.length, i + size)));
+      _load(indexes.sublist(i, min(indexes.length, i + size)), priority);
     }
   }
 
@@ -325,22 +387,44 @@ class ChunkSource extends ChangeNotifier {
     return (fraction * layout.totalChunks).floor().clamp(1, layout.lastChunk - 1);
   }
 
-  /// The viewer is about to show [page] of [pageCount], far from where it is:
-  /// the user dragged the page slider there, or scrolled fast.
+  /// The chunks page [page] needs: from the server's page map when there is
+  /// one, otherwise the guess around [chunkOfPage].
+  List<int> chunksOfPage(int page, int pageCount) {
+    final known = pageChunks?[page];
+    if (known != null) {
+      return [for (final n in known) if (n >= 0 && n < layout.totalChunks) n]..sort();
+    }
+    final target = chunkOfPage(page, pageCount);
+    if (target <= 0) return const [];
+    return [
+      for (var n = max(1, target - 1); n <= min(layout.lastChunk - 1, target + 1); n++) n,
+    ];
+  }
+
+  /// The user is jumping to [page] of [pageCount], far from where the viewer
+  /// is (the page slider, or a fast scroll).
   ///
-  /// The chunks where that page probably is are fetched now, before PDFium
-  /// asks for them, and if PDFium then walks the page tree towards it (misses
-  /// in order) the rest of the way is fetched at once. Safe to call often:
-  /// chunks already here or on the way are not asked for again.
+  /// - What was being fetched for an earlier jump, and all read-ahead, gives
+  ///   way: queued requests are dropped, and requests on the way are
+  ///   cancelled, unless PDFium waits for them (those always finish).
+  /// - The chunks of [page] are fetched at level 2, before PDFium asks.
+  /// - If PDFium then walks the page tree towards it (misses in order), the
+  ///   rest of the way is fetched at once, also at level 2.
   void prepareJump(int page, int pageCount) {
     if (_closed || failure != null || _left.isCompleted || maxReadAhead <= 0) return;
-    final target = chunkOfPage(page, pageCount);
-    if (target <= 0) return;
-    _jumpTarget = target;
-    _loadInPieces([
-      for (var n = max(1, target - 1); n <= min(layout.lastChunk - 1, target + 1); n++)
-        if (!_cache.containsKey(n) && !_loading.containsKey(n)) n,
-    ]);
+    for (final request in [..._queue, ..._sent]) {
+      if (request.priority == ChunkPriority.jump) request.priority = ChunkPriority.ahead;
+    }
+    _dropReadAhead();
+    final chunks = chunksOfPage(page, pageCount);
+    if (chunks.isEmpty) return;
+    _log('jump to page $page: chunks ${chunks.join(',')} '
+        '(${pageChunks?[page] != null ? 'from the page map' : 'estimated'})');
+    _jumpTarget = chunks.last;
+    _loadInPieces(
+      [for (final n in chunks) if (!_cache.containsKey(n) && !_loading.containsKey(n)) n],
+      ChunkPriority.jump,
+    );
   }
 
   FutureOr<Uint8List>? _cached(int index) {
@@ -349,10 +433,31 @@ class ChunkSource extends ChangeNotifier {
     return chunk;
   }
 
-  /// Starts fetching [indexes]. Each gets a future in [_loading], so a second
-  /// read that needs the same chunk waits for this fetch instead of sending
-  /// its own.
-  void _load(List<int> indexes) {
+  // ── Priority queue ──────────────────────────────────────────────────────
+  //
+  // Every fetch is a request with a level (ChunkPriority). Requests wait in
+  // [_queue] and are sent most urgent first, oldest first among equals. Level
+  // 1 is sent at once; levels 2 and 3 only while fewer than [maxInFlight]
+  // requests are on the way.
+  //
+  // A read that waits for a chunk raises its request to level 1. So a
+  // request at level 2 or 3 never has a read waiting for it, and dropping or
+  // cancelling it can never make a PDFium read fail.
+
+  final _queue = <_Request>[];
+  final _sent = <_Request>{};
+
+  /// The request (queued or on the way) that will deliver each chunk.
+  final _requestOf = <int, _Request>{};
+
+  /// How many reads wait for each chunk.
+  final _waiters = <int, int>{};
+
+  /// Starts getting [indexes]: from the device when [stored] has them,
+  /// otherwise by requests at [priority]. Each chunk gets a future in
+  /// [_loading], so a second read that needs it waits for this one.
+  void _load(List<int> indexes, ChunkPriority priority) {
+    if (indexes.isEmpty) return;
     final done = {for (final index in indexes) index: Completer<Uint8List>()};
     for (final entry in done.entries) {
       // A failure nobody is waiting for must not count as unhandled.
@@ -361,25 +466,106 @@ class ChunkSource extends ChangeNotifier {
     () async {
       try {
         final toFetch = await _loadStored(indexes, done);
-        for (final batch in planRequests(
-          toFetch,
-          maxChunks: layout.maxChunksPerRequest,
-        )) {
-          final chunks = await _fetchAndDecrypt(batch);
-          for (var i = 0; i < batch.length; i++) {
-            _keep(batch[i], chunks[i]);
-            _loading.remove(batch[i]);
-            done[batch[i]]!.complete(chunks[i]);
+        for (final batch in planRequests(toFetch, maxChunks: layout.maxChunksPerRequest)) {
+          final request = _Request(batch, priority, {for (final n in batch) n: done[n]!});
+          // Raised while it was being looked for on the device?
+          if (batch.any(_waiters.containsKey)) request.priority = ChunkPriority.needed;
+          _queue.add(request);
+          for (final n in batch) {
+            _requestOf[n] = request;
           }
-          _changed();
         }
+        _pump();
       } catch (error, stack) {
-        for (final entry in done.entries) {
-          _loading.remove(entry.key);
-          if (!entry.value.isCompleted) entry.value.completeError(error, stack);
-        }
+        _finish(done, error, stack);
       }
     }();
+  }
+
+  /// Sends what may be sent now, most urgent first.
+  void _pump() {
+    while (_queue.isNotEmpty && !_closed) {
+      // The first of the most urgent ones: reduce keeps the earlier on a tie.
+      final next = _queue.reduce((a, b) => b.priority.isMoreUrgentThan(a.priority) ? b : a);
+      if (next.priority != ChunkPriority.needed && _sent.length >= maxInFlight) return;
+      _queue.remove(next);
+      _send(next);
+    }
+  }
+
+  void _send(_Request request) {
+    _sent.add(request);
+    _log('→ ${chunksSpec(request.chunks)}  level ${request.priority.level} '
+        '${request.priority.label}  (${_sent.length} on the way, ${_queue.length} queued)');
+    () async {
+      try {
+        final chunks = await _fetchAndDecrypt(request);
+        for (var i = 0; i < request.chunks.length; i++) {
+          final n = request.chunks[i];
+          _keep(n, chunks[i]);
+          _forget(n, request);
+          final done = request.done[n]!;
+          if (!done.isCompleted) done.complete(chunks[i]);
+        }
+        _changed();
+      } catch (error, stack) {
+        for (final n in request.chunks) {
+          _forget(n, request);
+        }
+        _finish(request.done, error, stack);
+      } finally {
+        _sent.remove(request);
+        _pump();
+      }
+    }();
+  }
+
+  /// [request] no longer stands for chunk [n] (it arrived, failed or was
+  /// dropped). A newer request for the same chunk is left alone.
+  void _forget(int n, _Request request) {
+    if (identical(_requestOf[n], request)) _requestOf.remove(n);
+    if (identical(_loading[n], request.done[n]?.future)) _loading.remove(n);
+  }
+
+  void _finish(Map<int, Completer<Uint8List>> done, Object error, StackTrace stack) {
+    for (final entry in done.entries) {
+      if (identical(_loading[entry.key], entry.value.future)) _loading.remove(entry.key);
+      if (!entry.value.isCompleted) entry.value.completeError(error, stack);
+    }
+  }
+
+  /// A read now waits for chunk [index]: its request, if any, moves up.
+  void _raise(int index, ChunkPriority priority) {
+    final request = _requestOf[index];
+    if (request == null || !priority.isMoreUrgentThan(request.priority)) return;
+    final wasQueued = _queue.contains(request);
+    _log('↑ ${chunksSpec(request.chunks)}  level ${request.priority.level} → '
+        '${priority.level} ${priority.label}${wasQueued ? '' : ' (already on the way)'}');
+    request.priority = priority;
+    if (wasQueued) _pump();
+  }
+
+  /// Drops every level-3 request: queued ones are never sent, ones on the way
+  /// are cancelled. No read waits for any of them (see the notes above).
+  void _dropReadAhead() {
+    for (final request in [..._queue, ..._sent]) {
+      if (request.priority != ChunkPriority.ahead) continue;
+      if (request.chunks.any(_waiters.containsKey)) continue; // safety: never
+      final sent = _sent.contains(request);
+      _log('✗ ${chunksSpec(request.chunks)}  level 3 '
+          '${sent ? 'cancelled on the way' : 'dropped from the queue'}: nothing waits for it');
+      _queue.remove(request);
+      for (final n in request.chunks) {
+        _forget(n, request);
+      }
+      _finish(request.done, const _Dropped(), StackTrace.current);
+      if (sent && !request.cancel.isCompleted) request.cancel.complete();
+    }
+    _pump();
+  }
+
+  void _log(String text) {
+    if (log) debugPrint('[CHUNKS] $text');
   }
 
   /// Answers the chunks of [indexes] found in [stored] and returns the rest,
@@ -414,10 +600,11 @@ class ChunkSource extends ChangeNotifier {
     }
     decryptTime += clock.elapsed;
     chunksFromDevice += batch.length;
+    _log('· ${chunksSpec(batch)} from this device');
     for (var i = 0; i < batch.length; i++) {
       _keep(batch[i], plain[i]);
-      _loading.remove(batch[i]);
-      done[batch[i]]!.complete(plain[i]);
+      if (identical(_loading[batch[i]], done[batch[i]]!.future)) _loading.remove(batch[i]);
+      if (!done[batch[i]]!.isCompleted) done[batch[i]]!.complete(plain[i]);
     }
     _changed();
     return [for (final n in indexes) if (!found.containsKey(n)) n];
@@ -425,25 +612,34 @@ class ChunkSource extends ChangeNotifier {
 
   /// One request: fetch, split, decrypt, repeated until it works. It gives up
   /// only when the server refuses, when [maxDamagedAnswers] answers in a row
-  /// don't decrypt, or when the screen has gone ([leave]).
-  Future<List<Uint8List>> _fetchAndDecrypt(List<int> batch) async {
+  /// don't decrypt, when the screen has gone ([leave]), or when the request
+  /// was cancelled (nothing waits for it any more).
+  Future<List<Uint8List>> _fetchAndDecrypt(_Request request) async {
+    final batch = request.chunks;
     var pause = firstRetryDelay;
     var damaged = 0;
     for (;;) {
       _check();
+      if (request.cancel.isCompleted) throw const _Dropped();
       final clock = Stopwatch()..start();
       final Uint8List body;
       try {
         requests++;
-        body = await _fetch(chunksSpec(batch));
+        body = await _fetch(chunksSpec(batch), request.cancel.future);
       } catch (error) {
+        // Cancelled on purpose: not a network problem, don't repeat it.
+        if (request.cancel.isCompleted) throw const _Dropped();
         if (!_isTemporary(error)) {
           _fail(error);
           rethrow;
         }
         if (_left.isCompleted) rethrow;
         _waitFor(error);
-        await Future.any([Future<void>.delayed(pause), _left.future]);
+        await Future.any([
+          Future<void>.delayed(pause),
+          _left.future,
+          request.cancel.future,
+        ]);
         pause = pause * 2 > maxRetryDelay ? maxRetryDelay : pause * 2;
         continue;
       }
@@ -527,4 +723,26 @@ class ChunkSource extends ChangeNotifier {
     _cipher.dispose();
     super.dispose();
   }
+}
+
+/// One request to the chunks endpoint: [chunks] in a row, at [priority].
+class _Request {
+  _Request(this.chunks, this.priority, this.done);
+
+  final List<int> chunks;
+  ChunkPriority priority;
+
+  /// What each chunk's readers wait on.
+  final Map<int, Completer<Uint8List>> done;
+
+  /// Completed to cancel the request while it is on the way.
+  final cancel = Completer<void>();
+}
+
+/// A request that was dropped or cancelled because nothing waited for it.
+class _Dropped implements Exception {
+  const _Dropped();
+
+  @override
+  String toString() => 'Not needed any more.';
 }

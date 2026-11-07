@@ -191,17 +191,16 @@ void main() {
       for (var n = 1; n <= 3; n++) {
         await file.expectRead(source, n * 1024 + 3, 10); // PDFium walking
       }
-      await Future<void>.delayed(Duration.zero);
-      // 1 alone (with 2), then at 3 the walk is clear: 4 to 17 in pieces of
-      // 2, sent at once. 18 to 20 were asked for by the jump itself.
+      for (var n = 4; n <= 20; n++) {
+        await file.expectRead(source, n * 1024, 10);
+      }
+      // 1 alone (with 2), then at 3 the walk is clear: 4 to 17 are asked for
+      // at once as part of the jump, in pieces of 2, nearest first (at most 3
+      // on the way at a time). 18 to 20 were asked for by the jump itself.
       expect(file.server.requests, [
         '0,39', '18-19', '20', '1', '2', '3',
         '4-5', '6-7', '8-9', '10-11', '12-13', '14-15', '16-17',
       ]);
-      for (var n = 4; n <= 20; n++) {
-        await file.expectRead(source, n * 1024, 10);
-      }
-      expect(file.server.requests.length, 13, reason: 'the walk needed nothing more');
       source.dispose();
     });
 
@@ -377,7 +376,7 @@ void main() {
       file.server.beforeAnswer = null;
       final hanging = ChunkSource(
         layout: file.layout,
-        fetch: (_) => Future<Uint8List>.delayed(const Duration(seconds: 30), () => Uint8List(0)),
+        fetch: (_, _) => Future<Uint8List>.delayed(const Duration(seconds: 30), () => Uint8List(0)),
         cipher: ChunkCipher(layout: file.layout, fileKey: file.fileKey, inBackground: false),
         failedReadDelay: Duration.zero,
         leavingGrace: const Duration(milliseconds: 50),

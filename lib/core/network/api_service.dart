@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:dio/dio.dart';
@@ -45,12 +46,20 @@ class ApiService {
   }) => _json('POST', url, body: body, headers: headers);
 
   /// GET, answering the raw bytes (files, encrypted chunks).
-  Future<Uint8List> getBytes(Uri url, {Map<String, String>? headers}) async {
+  ///
+  /// When [cancelled] completes before the answer is in, the call is aborted
+  /// and throws a [NetworkException].
+  Future<Uint8List> getBytes(
+    Uri url, {
+    Map<String, String>? headers,
+    Future<void>? cancelled,
+  }) async {
     final response = await send<List<int>>(
       'GET',
       url,
       headers: headers,
       responseType: ResponseType.bytes,
+      cancelled: cancelled,
     );
     final data = response.data ?? const <int>[];
     return data is Uint8List ? data : Uint8List.fromList(data);
@@ -82,11 +91,15 @@ class ApiService {
     Object? body,
     Map<String, String>? headers,
     ResponseType responseType = ResponseType.json,
+    Future<void>? cancelled,
   }) async {
+    final token = cancelled == null ? null : CancelToken();
+    if (token != null) unawaited(cancelled!.then((_) => token.cancel()));
     try {
       return await dio.requestUri<T>(
         url,
         data: body,
+        cancelToken: token,
         options: Options(
           method: method,
           headers: headers,
